@@ -39,11 +39,11 @@ def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
             logging.debug("%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
         else:
             memc = memcache.Client([memc_addr], socket_timeout=MEMCACHE_TIMEOUT)
-            for ind in range(MEMCACHE_RETRY):
+            for attempt in range(MEMCACHE_RETRY):
                 if memc.set(key, packed):
                     break
-                time.sleep(ind * MEMCACHE_RETRY_DELAY)
-                if ind == 2:
+                time.sleep(attempt * MEMCACHE_RETRY_DELAY)
+                if attempt == MEMCACHE_RETRY-1:
                     return False
     except Exception as e:
         logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
@@ -139,7 +139,7 @@ def main(options):
     }
     tasks = multiprocessing.Queue()
     cpu_num = multiprocessing.cpu_count()
-    num_writer = cpu_num - 1 if cpu_num > 2 else 2
+    num_writer = cpu_num - 2 if cpu_num > 2 else 2
     logging.info('Will be create %d processes' % num_writer)
     writers_mem = [WritedInMemcached(tasks, device_memc, options) for i in range(num_writer)]
     
