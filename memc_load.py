@@ -13,7 +13,7 @@ import time
 import multiprocessing
 
 NORMAL_ERR_RATE = 0.01
-NUM_PUT_TASK = 10
+NUM_PUT_TASK = 40
 MEMCACHE_TIMEOUT = 1
 MEMCACHE_RETRY = 3
 MEMCACHE_RETRY_DELAY = 0.1
@@ -27,20 +27,13 @@ def dot_rename(path):
     os.rename(path, os.path.join(head, "." + fn))
 
 
-def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
-    ua = appsinstalled_pb2.UserApps()
-    ua.lat = appsinstalled.lat
-    ua.lon = appsinstalled.lon
-    key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
-    ua.apps.extend(appsinstalled.apps)
-    packed = ua.SerializeToString()
+def insert_appsinstalled(memc_addr, packeds, dry_run=False):
     try:
         if dry_run:
-            logging.debug("%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
+            logging.debug("{} -> {}".format(memc_addr, str(packeds).replace("\n", " ")))
         else:
-            memc = memcache.Client([memc_addr], socket_timeout=MEMCACHE_TIMEOUT)
             for attempt in range(MEMCACHE_RETRY):
-                if memc.set(key, packed):
+                if not memc_addr.set_multi(packeds):
                     break
                 time.sleep(attempt * MEMCACHE_RETRY_DELAY)
                 if attempt == MEMCACHE_RETRY-1:
@@ -83,7 +76,7 @@ class WritedInMemcached(multiprocessing.Process):
     def run(self):
         self.proc_name = self.name
         while True:
-            self.next_task = self.task_req.get()
+            self.next_task = self.task_req.get(timeout=0.1)
             if self.next_task is None:
                 if self.processed != 0:
                     self.err_rate = float(self.errors) / self.processed
@@ -92,19 +85,28 @@ class WritedInMemcached(multiprocessing.Process):
                 else:
                     logging.error("{} - High error rate ({} > {}). Failed load".format(self.proc_name, self.err_rate, NORMAL_ERR_RATE))
                 break
-            self.appsinstalled = parse_appsinstalled(self.next_task)
-            self.memc_addr = self.mem.get(self.appsinstalled.dev_type)
+            self.memc_addr = self.mem.get(self.next_task[0])
             if not self.memc_addr:
                 self.errors += 1
-                logging.error("Unknow device type: {}".format(self.appsinstalled.dev_type))
+                logging.error("Unknow device type: {}".format(self.next_task[0]))
                 continue
-            self.ok = insert_appsinstalled(self.memc_addr, self.appsinstalled, self.options.dry)
+            self.ok = insert_appsinstalled(self.memc_addr, self.next_task[1], self.options.dry)
             if not self.ok:
                 self.errors += 1
             else:
                 self.processed += 1
-            
- 
+
+
+def serialised_line(line):
+    ua = appsinstalled_pb2.UserApps()
+    ua.lat = line.lat
+    ua.lon = line.lon
+    key = "%s:%s" % (line.dev_type, line.dev_id)
+    ua.apps.extend(line.apps)
+    packed = ua.SerializeToString()
+    return key, packed                
+
+
 class Task(multiprocessing.Process):
     def __init__(self, task_req, path, num_task, num_wr):
         multiprocessing.Process.__init__(self)
@@ -116,15 +118,27 @@ class Task(multiprocessing.Process):
     def run(self):
         for file_name in sorted(glob.iglob(self.path), key=os.path.getmtime):
             with gzip.open(file_name) as fn:
-                lines = iter(fn) 
-                while True:
-                    try:
-                        for _ in range(self.num_task):
-                            line = lines.__next__().strip()
-                            if line:
-                                self.task_req.put(line)
-                    except StopIteration:
-                        break
+                pack = {}
+                item_pack = 0
+                for line in fn:
+                    line = line.strip()
+                    line_pars = parse_appsinstalled(line)
+                    key, packed = serialised_line(line_pars)
+                    pack_temp = pack.get(line_pars.dev_type)
+                    if not pack_temp:
+                        pack_temp ={}
+                    pack_temp.update({key:packed})
+                    pack.update({line_pars.dev_type:pack_temp})
+                    if item_pack < NUM_PUT_TASK:
+                        item_pack += 1
+                    else:
+                        item_pack = 0
+                        for ind_memc in pack.keys():
+                            self.task_req.put([ind_memc, pack[ind_memc]])
+                        pack = {}
+                else: 
+                     for ind_memc in pack.keys():
+                            self.task_req.put([ind_memc, pack[ind_memc]])
             dot_rename(file_name)
         for _ in range(self.num_wr):
             self.task_req.put(None)
@@ -137,11 +151,13 @@ def main(options):
         b"adid": options.adid,
         b"dvid": options.dvid,
     }
+    
     tasks = multiprocessing.Queue()
     cpu_num = multiprocessing.cpu_count()
     num_writer = cpu_num - 2 if cpu_num > 2 else 2
     logging.info('Will be create %d processes' % num_writer)
-    writers_mem = [WritedInMemcached(tasks, device_memc, options) for i in range(num_writer)]
+    memc_dev_adr = {device : memcache.Client([device_memc[device]], socket_timeout=MEMCACHE_TIMEOUT) for device in device_memc.keys()}
+    writers_mem = [WritedInMemcached(tasks, memc_dev_adr, options) for i in range(num_writer)]
     
     for w in writers_mem:
         w.start()
