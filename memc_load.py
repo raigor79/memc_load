@@ -129,7 +129,6 @@ class Task(multiprocessing.Process):
                 break
             with gzip.open(file_name) as fn:
                 pack = {}
-                item_pack = 0
                 for line in fn:
                     line = line.strip()
                     line_pars = parse_appsinstalled(line)
