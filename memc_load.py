@@ -13,7 +13,7 @@ import time
 import multiprocessing
 
 NORMAL_ERR_RATE = 0.01
-NUM_PUT_TASK = 40
+NUM_PUT_TASK = 100
 MEMCACHE_TIMEOUT = 1
 MEMCACHE_RETRY = 3
 MEMCACHE_RETRY_DELAY = 0.1
@@ -139,13 +139,10 @@ class Task(multiprocessing.Process):
                         pack_temp ={}
                     pack_temp.update({key:packed})
                     pack.update({line_pars.dev_type:pack_temp})
-                    if item_pack < NUM_PUT_TASK:
-                        item_pack += 1
-                    else:
-                        item_pack = 0
-                        for ind_memc in pack.keys():
+                    for ind_memc in pack.keys():
+                        if len(pack[ind_memc]) >= NUM_PUT_TASK:
                             self.task_req.put([ind_memc, pack[ind_memc]])
-                        pack = {}
+                            pack[ind_memc] = {}
                 else: 
                      for ind_memc in pack.keys():
                             self.task_req.put([ind_memc, pack[ind_memc]])
