@@ -75,9 +75,13 @@ class WritedInMemcached(multiprocessing.Process):
         
     def run(self):
         self.proc_name = self.name
+        logging.info('Will be create %s processes' % self.proc_name)
         while True:
+            if self.task_req.empty():
+                continue
             self.next_task = self.task_req.get(timeout=0.1)
             if self.next_task is None:
+                logging.info('Closed %s processes' % self.proc_name)
                 if self.processed != 0:
                     self.err_rate = float(self.errors) / self.processed
                 if self.err_rate < NORMAL_ERR_RATE:
@@ -108,15 +112,21 @@ def serialised_line(line):
 
 
 class Task(multiprocessing.Process):
-    def __init__(self, task_req, path, num_task, num_wr):
+    def __init__(self, task_req, files, num_task, num_wr):
         multiprocessing.Process.__init__(self)
         self.task_req = task_req
-        self.path = path
+        self.files = files
         self.num_task = num_task
         self.num_wr = num_wr
 
     def run(self):
-        for file_name in sorted(glob.iglob(self.path), key=os.path.getmtime):
+        self.proc_name = self.name
+        logging.info('Will be create %s processes' % self.proc_name)
+        while True:
+            file_name = self.files.get(timeout=0.1)
+            if file_name == None:
+                logging.info('Closed %s processes' % self.proc_name)
+                break
             with gzip.open(file_name) as fn:
                 pack = {}
                 item_pack = 0
@@ -140,8 +150,6 @@ class Task(multiprocessing.Process):
                      for ind_memc in pack.keys():
                             self.task_req.put([ind_memc, pack[ind_memc]])
             dot_rename(file_name)
-        for _ in range(self.num_wr):
-            self.task_req.put(None)
 
  
 def main(options):
@@ -152,20 +160,34 @@ def main(options):
         b"dvid": options.dvid,
     }
     
-    tasks = multiprocessing.Queue()
+    qtasks = multiprocessing.Queue()
+    qfiles = multiprocessing.Queue() 
     cpu_num = multiprocessing.cpu_count()
-    num_writer = cpu_num - 2 if cpu_num > 2 else 2
-    logging.info('Will be create %d processes' % num_writer)
+    num_tasks = 2
+    num_writer = cpu_num - num_tasks if cpu_num > 2 else 2
+    
     memc_dev_adr = {device : memcache.Client([device_memc[device]], socket_timeout=MEMCACHE_TIMEOUT) for device in device_memc.keys()}
-    writers_mem = [WritedInMemcached(tasks, memc_dev_adr, options) for i in range(num_writer)]
+    writers_mem = [WritedInMemcached(qtasks, memc_dev_adr, options) for i in range(num_writer)]
     
     for w in writers_mem:
         w.start()
 
-    task = Task(tasks, options.pattern , NUM_PUT_TASK, num_writer)
-    task.start()
-    task.join()
+    for file_name in sorted(glob.iglob(options.pattern), key=os.path.getmtime):
+        qfiles.put(file_name)
+    else:
+        for _ in range(num_tasks):
+            qfiles.put(None)
+
+    task_id = [Task(qtasks, qfiles, NUM_PUT_TASK, num_writer) for i in range(num_tasks)]
+    for task in task_id:
+        task.start()
     
+    for task in task_id:
+        task.join()
+    
+    for _ in range(num_writer):
+        qtasks.put(None)
+            
     for w in writers_mem:
         w.join()
 
